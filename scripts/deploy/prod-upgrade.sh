@@ -125,6 +125,47 @@ pre_deployment_check() {
     fi
     log "  ✓ Docker 运行正常"
     
+    # 检查并配置 Docker 镜像加速器（国内服务器必需）
+    log "检查 Docker 镜像加速器..."
+    if [ ! -f /etc/docker/daemon.json ] || ! grep -q "registry-mirrors" /etc/docker/daemon.json 2>/dev/null; then
+        warn "未配置 Docker 镜像加速器，可能导致镜像拉取超时"
+        log "正在配置镜像加速器..."
+        
+        mkdir -p /etc/docker
+        cat > /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": [
+    "https://hub-mirror.c.163.com",
+    "https://mirror.baidubce.com",
+    "https://docker.m.daocloud.io"
+  ],
+  "dns": ["8.8.8.8", "114.114.114.114"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m",
+    "max-file": "3"
+  }
+}
+EOF
+        
+        log "重启 Docker 服务..."
+        systemctl daemon-reload
+        systemctl restart docker
+        
+        # 等待 Docker 启动
+        sleep 3
+        
+        if docker info &> /dev/null; then
+            log "  ✓ Docker 镜像加速器配置完成"
+        else
+            warn "Docker 重启后可能异常，尝试恢复默认配置"
+            rm -f /etc/docker/daemon.json
+            systemctl restart docker
+        fi
+    else
+        log "  ✓ Docker 镜像加速器已配置"
+    fi
+    
     # 检查Docker Compose
     if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
         error "Docker Compose 未安装"
@@ -254,33 +295,35 @@ build_new_version() {
     
     log "目标端口: Frontend=$FRONTEND_PORT, Backend=$BACKEND_PORT"
     
+    # 创建小写的环境标识（Docker镜像标签必须小写）
+    local TARGET_ENV_LOWER=$(echo "$TARGET_ENV" | tr '[:upper:]' '[:lower:]')
+    
     # 创建临时docker-compose文件
-    local compose_file="docker-compose.$TARGET_ENV.yml"
+    local compose_file="docker-compose.$TARGET_ENV_LOWER.yml"
     cat > "$compose_file" << EOF
-version: '3.8'
-
 services:
-  redis-$TARGET_ENV:
+  redis-$TARGET_ENV_LOWER:
     image: redis:7-alpine
-    container_name: smartalbum-redis-$TARGET_ENV
+    container_name: smartalbum-redis-$TARGET_ENV_LOWER
     restart: always
     networks:
-      - smartalbum-$TARGET_ENV
+      - smartalbum-$TARGET_ENV_LOWER
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  backend-$TARGET_ENV:
+  backend-$TARGET_ENV_LOWER:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: smartalbum-backend-$TARGET_ENV
+    image: smartalbum-backend:$TARGET_ENV_LOWER
+    container_name: smartalbum-backend-$TARGET_ENV_LOWER
     restart: always
     environment:
       - DATABASE_URL=sqlite+aiosqlite:///./data/smartalbum.db
-      - REDIS_URL=redis://redis-$TARGET_ENV:6379/0
+      - REDIS_URL=redis://redis-$TARGET_ENV_LOWER:6379/0
       - STORAGE_PATH=/app/storage
       - DEBUG=false
       - PORT=9999
@@ -291,9 +334,9 @@ services:
       - ./storage:/app/storage
       - ./backend/logs:/app/logs
     networks:
-      - smartalbum-$TARGET_ENV
+      - smartalbum-$TARGET_ENV_LOWER
     depends_on:
-      redis-$TARGET_ENV:
+      redis-$TARGET_ENV_LOWER:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9999/api/health"]
@@ -302,18 +345,19 @@ services:
       retries: 5
       start_period: 30s
 
-  frontend-$TARGET_ENV:
+  frontend-$TARGET_ENV_LOWER:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: smartalbum-frontend-$TARGET_ENV
+    image: smartalbum-frontend:$TARGET_ENV_LOWER
+    container_name: smartalbum-frontend-$TARGET_ENV_LOWER
     restart: always
     ports:
       - "\${FRONTEND_PORT}:80"
     networks:
-      - smartalbum-$TARGET_ENV
+      - smartalbum-$TARGET_ENV_LOWER
     depends_on:
-      - backend-$TARGET_ENV
+      - backend-$TARGET_ENV_LOWER
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
       interval: 10s
@@ -322,12 +366,15 @@ services:
       start_period: 10s
 
 networks:
-  smartalbum-$TARGET_ENV:
+  smartalbum-$TARGET_ENV_LOWER:
     driver: bridge
 EOF
     
     log "停止现有 $TARGET_ENV 环境 (如果存在)..."
     docker-compose -f "$compose_file" down --remove-orphans 2>/dev/null || true
+    
+    # 同时清理可能存在的旧版本容器（大写名称）
+    docker rm -f smartalbum-backend-$TARGET_ENV smartalbum-frontend-$TARGET_ENV smartalbum-redis-$TARGET_ENV 2>/dev/null || true
     
     log "拉取最新代码..."
     if [ -d ".git" ]; then
@@ -371,6 +418,9 @@ health_check() {
     local backend_port=$( [ "$TARGET_ENV" = "BLUE" ] && echo "$BLUE_BACKEND_PORT" || echo "$GREEN_BACKEND_PORT" )
     local frontend_port=$( [ "$TARGET_ENV" = "BLUE" ] && echo "$BLUE_FRONTEND_PORT" || echo "$GREEN_FRONTEND_PORT" )
     
+    # 使用小写的容器名称
+    local TARGET_ENV_LOWER=$(echo "$TARGET_ENV" | tr '[:upper:]' '[:lower:]')
+    
     local retry_count=0
     local health_passed=false
     
@@ -379,7 +429,7 @@ health_check() {
         
         # 检查容器状态
         local all_healthy=true
-        for container in "smartalbum-backend-$TARGET_ENV" "smartalbum-frontend-$TARGET_ENV"; do
+        for container in "smartalbum-backend-$TARGET_ENV_LOWER" "smartalbum-frontend-$TARGET_ENV_LOWER"; do
             local status=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "unknown")
             if [ "$status" != "healthy" ]; then
                 log "  容器 $container 状态: $status"
@@ -511,10 +561,14 @@ EOF
         # 如果没有Nginx，直接修改docker端口映射
         warn "未检测到 Nginx，使用 Docker 端口切换"
         
+        # 使用小写的环境标识
+        local TARGET_ENV_LOWER=$(echo "$TARGET_ENV" | tr '[:upper:]' '[:lower:]')
+        local ACTIVE_ENV_LOWER=$(echo "$ACTIVE_ENV" | tr '[:upper:]' '[:lower:]')
+        
         # 停止旧环境
         if [ "$ACTIVE_ENV" != "NONE" ]; then
             log "停止旧环境 ($ACTIVE_ENV)..."
-            local old_compose="docker-compose.$ACTIVE_ENV.yml"
+            local old_compose="docker-compose.$ACTIVE_ENV_LOWER.yml"
             if [ -f "$old_compose" ]; then
                 docker-compose -f "$old_compose" down 2>/dev/null || true
             fi
@@ -522,12 +576,12 @@ EOF
         
         # 修改目标环境端口映射到80
         log "将 $TARGET_ENV 环境绑定到端口 80..."
-        local compose_file="docker-compose.$TARGET_ENV.yml"
-        docker-compose -f "$compose_file" stop frontend-$TARGET_ENV
+        local compose_file="docker-compose.$TARGET_ENV_LOWER.yml"
+        docker-compose -f "$compose_file" stop frontend-$TARGET_ENV_LOWER
         
         # 使用sed修改端口映射
         sed -i "s/- \"${target_port}:80\"/- \"80:80\"/" "$compose_file"
-        docker-compose -f "$compose_file" up -d frontend-$TARGET_ENV
+        docker-compose -f "$compose_file" up -d frontend-$TARGET_ENV_LOWER
     fi
     
     log "流量已切换到 $TARGET_ENV 环境 ✓"
