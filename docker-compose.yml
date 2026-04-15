@@ -1,0 +1,38 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: smartalbum-backend
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./data:/app/data
+      - ./storage:/app/storage
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/smartalbum.db
+    restart: unless-stopped
+    networks:
+      - smartalbum-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: smartalbum-frontend
+    ports:
+      - "8888:8888"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:9999
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - smartalbum-network
+
+networks:
+  smartalbum-network:
+    driver: bridge

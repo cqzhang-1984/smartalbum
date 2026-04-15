@@ -1,0 +1,74 @@
+version: '3.8'
+
+# SmartAlbum 低内存服务器部署配置
+# 适用于 2GB-4GB 内存的轻量服务器
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: smartalbum-redis
+    restart: unless-stopped
+    # 内存限制
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy allkeys-lru
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.low-memory
+    container_name: smartalbum-backend
+    restart: unless-stopped
+    ports:
+      - "9999:9999"
+    # 内存限制
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/smartalbum.db
+      - STORAGE_PATH=/app/storage
+      - REDIS_URL=redis://redis:6379
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./storage:/app/storage
+      - ./backend/logs:/app/logs
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9999/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.low-memory
+    container_name: smartalbum-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    # 内存限制
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  redis-data:

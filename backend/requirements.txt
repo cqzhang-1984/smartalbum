@@ -1,0 +1,50 @@
+# FastAPI核心依赖
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# 数据库
+sqlalchemy==2.0.25
+alembic==1.13.1
+aiosqlite==0.19.0
+
+# 任务队列
+celery==5.3.6
+redis==5.0.1
+
+# 图像处理
+Pillow==10.2.0
+piexif==1.1.3
+
+# AI集成
+langchain
+langchain-openai
+langchain-google-genai
+langchain-anthropic
+openai==1.10.0
+chromadb==0.4.22
+sentence-transformers==2.3.1
+volcengine-python-sdk[ark]
+
+# 人脸识别
+face-recognition==1.3.0
+dlib==19.24.6
+
+# 工具库
+python-dotenv==1.0.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+httpx==0.26.0
+aiofiles==23.2.1
+
+# 腾讯云COS存储
+cos-python-sdk-v5==1.9.25
+
+# 认证相关
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# 测试框架
+pytest==8.0.0
+pytest-asyncio==0.23.5
+httpx==0.26.0  # 用于 FastAPI TestClient
