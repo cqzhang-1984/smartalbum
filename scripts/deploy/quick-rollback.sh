@@ -127,7 +127,8 @@ list_backups() {
         if [ -f "$file" ]; then
             local filename=$(basename "$file")
             local size=$(du -h "$file" | cut -f1)
-            local mtime=$(stat -c "%y" "$file" 2>/dev/null | cut -d'.' -f1 || stat -f "%Sm" "$file" 2>/dev/null)
+            local mtime
+            mtime=$(stat -c "%y" "$file" 2>/dev/null | cut -d'.' -f1 || stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$file" 2>/dev/null || ls -l "$file" 2>/dev/null | awk '{print $6, $7, $8}')
             
             printf "%-25s %-12s %-20s\n" "$mtime" "$size" "$filename"
             count=$((count + 1))
@@ -201,30 +202,24 @@ stop_current_environment() {
     
     cd "$PROJECT_ROOT"
     
-    # 停止所有 docker-compose 文件
-    for compose_file in docker-compose*.yml; do
-        if [ -f "$compose_file" ]; then
-            log "  停止: $compose_file"
-            docker-compose -f "$compose_file" down --remove-orphans 2>/dev/null || true
-        fi
-    done
+    # 停止裸机服务
+    log "  停止系统服务..."
+    sudo systemctl stop smartalbum-backend 2>/dev/null || true
+    sudo systemctl stop smartalbum-frontend 2>/dev/null || true
     
-    # 停止特定容器
-    local containers=$(docker ps -q --filter "name=smartalbum" 2>/dev/null || true)
-    if [ -n "$containers" ]; then
-        log "  停止剩余容器..."
-        docker stop $containers 2>/dev/null || true
-        docker rm $containers 2>/dev/null || true
-    fi
+    # 确保端口释放
+    fuser -k 9999/tcp 2>/dev/null || true
+    fuser -k 8888/tcp 2>/dev/null || true
     
     # 等待确保完全停止
     sleep 3
     
-    local remaining=$(docker ps -q --filter "name=smartalbum" 2>/dev/null | wc -l)
+    # 检查进程是否仍在运行
+    local remaining=$(pgrep -f "smartalbum" | wc -l)
     if [ "$remaining" -eq 0 ]; then
         log "  ✓ 所有服务已停止"
     else
-        warn "  仍有 $remaining 个容器在运行"
+        warn "  仍有 $remaining 个进程在运行"
     fi
     
     return 0
@@ -327,25 +322,19 @@ start_services() {
     
     cd "$PROJECT_ROOT"
     
-    # 使用生产配置启动
-    if [ -f "docker-compose.prod.yml" ]; then
-        log "  使用 docker-compose.prod.yml 启动..."
-        if docker-compose -f docker-compose.prod.yml up -d; then
-            log "    ✓ 服务已启动"
-        else
-            error "服务启动失败"
-            return 1
-        fi
-    elif [ -f "docker-compose.yml" ]; then
-        log "  使用 docker-compose.yml 启动..."
-        if docker-compose up -d; then
-            log "    ✓ 服务已启动"
-        else
-            error "服务启动失败"
-            return 1
-        fi
+    # 启动裸机服务
+    log "  启动系统服务..."
+    if sudo systemctl start smartalbum-backend; then
+        log "    ✓ 后端服务已启动"
     else
-        error "未找到 docker-compose 文件"
+        error "后端服务启动失败"
+        return 1
+    fi
+    
+    if sudo systemctl start smartalbum-frontend; then
+        log "    ✓ 前端服务已启动"
+    else
+        error "前端服务启动失败"
         return 1
     fi
     

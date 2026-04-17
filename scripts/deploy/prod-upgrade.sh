@@ -11,6 +11,12 @@ set -euo pipefail
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# 加载公共库（如果存在）
+if [ -f "$SCRIPT_DIR/../lib/common.sh" ]; then
+    source "$SCRIPT_DIR/../lib/common.sh"
+fi
+
 LOG_DIR="/var/log/smartalbum/deploy"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$LOG_DIR/deploy-$TIMESTAMP.log"
@@ -26,13 +32,13 @@ MAX_RETRY_ATTEMPTS=${MAX_RETRY_ATTEMPTS:-12}
 TRAFFIC_SWITCH_BATCH=${TRAFFIC_SWITCH_BATCH:-10}
 ROLLBACK_THRESHOLD_ERROR_RATE=${ROLLBACK_THRESHOLD_ERROR_RATE:-1}
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# 颜色定义（如果公共库未加载）
+: "${RED:=\033[0;31m}"
+: "${GREEN:=\033[0;32m}"
+: "${YELLOW:=\033[1;33m}"
+: "${BLUE:=\033[0;34m}"
+: "${CYAN:=\033[0;36m}"
+: "${NC:=\033[0m}"
 
 # 状态跟踪
 DEPLOYMENT_STATUS="INIT"
@@ -470,7 +476,7 @@ health_check() {
     local response_time=$(curl -o /dev/null -s -w "%{time_total}" "http://localhost:$backend_port/api/health")
     log "  API 响应时间: ${response_time}s"
     
-    if (( $(echo "$response_time > 2.0" | bc -l) )); then
+    if awk "BEGIN {exit !($response_time > 2.0)}"; then
         warn "API 响应时间较慢，但仍在可接受范围"
     fi
     
@@ -629,8 +635,9 @@ monitor_verification() {
         fi
         
         # 检查响应时间
-        local response_time=$(curl -o /dev/null -s -w "%{time_total}" "http://localhost/api/health" 2>/dev/null || echo "999")
-        if (( $(echo "$response_time > 5.0" | bc -l 2>/dev/null || echo "1") )); then
+        local response_time
+        response_time=$(curl -o /dev/null -s -w "%{time_total}" "http://localhost/api/health" 2>/dev/null || echo "999")
+        if awk "BEGIN {exit !($response_time > 5.0)}" 2>/dev/null; then
             warn "  响应时间较长: ${response_time}s"
         fi
         

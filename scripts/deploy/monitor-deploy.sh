@@ -169,7 +169,7 @@ check_alerts() {
     fi
     
     # 检查内存
-    if (( $(echo "${METRICS[memory_usage]} > $THRESHOLD_MEMORY" | bc -l 2>/dev/null || echo "0") )); then
+    if awk "BEGIN {exit !(${METRICS[memory_usage]} > $THRESHOLD_MEMORY)}" 2>/dev/null; then
         alerts+=("内存使用率过高: ${METRICS[memory_usage]}% (阈值: ${THRESHOLD_MEMORY}%)")
     fi
     

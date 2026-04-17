@@ -38,27 +38,29 @@ show_banner() {
 
 show_menu() {
     echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  主菜单${NC}"
+    echo -e "${BLUE}  SmartAlbum 裸机部署管理${NC}"
     echo -e "${BLUE}========================================${NC}"
     echo ""
     echo -e "${GREEN}部署操作:${NC}"
-    echo "  1) 执行完整部署 (零停机蓝绿部署)"
+    echo "  1) 执行完整裸机部署"
     echo "  2) 执行快速部署 (跳过备份)"
-    echo "  3) 仅构建新版本"
+    echo "  3) 仅更新后端代码"
+    echo "  4) 仅更新前端代码"
     echo ""
     echo -e "${YELLOW}检查与监控:${NC}"
-    echo "  4) 运行健康检查"
-    echo "  5) 运行数据迁移检查"
-    echo "  6) 启动部署监控"
+    echo "  5) 运行健康检查"
+    echo "  6) 查看系统状态"
+    echo "  7) 启动实时监控"
     echo ""
     echo -e "${RED}回滚操作:${NC}"
-    echo "  7) 执行快速回滚"
-    echo "  8) 查看可用备份"
+    echo "  8) 执行快速回滚"
+    echo "  9) 查看可用备份"
     echo ""
     echo -e "${BLUE}维护操作:${NC}"
-    echo "  9) 查看服务状态"
-    echo " 10) 查看日志"
-    echo " 11) 执行全量备份"
+    echo " 10) 重启所有服务"
+    echo " 11) 查看服务日志"
+    echo " 12) 执行全量备份"
+    echo " 13) 清理系统"
     echo ""
     echo "  0) 退出"
     echo ""
@@ -70,20 +72,20 @@ show_menu() {
 # =============================================================================
 do_full_deploy() {
     echo -e "${CYAN}========================================${NC}"
-    echo -e "${CYAN}  执行完整部署${NC}"
+    echo -e "${CYAN}  执行完整裸机部署${NC}"
     echo -e "${CYAN}========================================${NC}"
     echo ""
     echo "这将执行:"
     echo "  1. 预部署检查"
     echo "  2. 全量备份"
-    echo "  3. 蓝绿部署"
-    echo "  4. 健康检查"
-    echo "  5. 流量切换"
-    echo "  6. 监控验证"
+    echo "  3. 后端代码更新"
+    echo "  4. 前端代码构建"
+    echo "  5. 服务重启"
+    echo "  6. 健康检查"
     echo ""
     read -p "确认执行? [y/N]: " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        bash "$SCRIPT_DIR/prod-upgrade.sh"
+        bash "$SCRIPT_DIR/bare-metal-upgrade.sh"
         echo ""
         read -p "按回车键继续..."
     fi
@@ -95,28 +97,62 @@ do_quick_deploy() {
     echo ""
     read -p "确认执行快速部署? [y/N]: " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        bash "$SCRIPT_DIR/prod-upgrade.sh" --skip-backup
+        bash "$SCRIPT_DIR/bare-metal-upgrade.sh" --skip-backup
         echo ""
         read -p "按回车键继续..."
     fi
 }
 
 do_build_only() {
+    echo -e "${YELLOW}裸机部署无需构建Docker镜像${NC}"
+    echo "请直接更新代码并重启服务:"
+    echo "  1. cd $PROJECT_ROOT && git pull"
+    echo "  2. 后端: systemctl restart smartalbum-backend"
+    echo "  3. 前端: cd frontend && npm run build"
+    echo ""
+    read -p "按回车键继续..."
+}
+
+do_update_backend() {
     echo -e "${CYAN}========================================${NC}"
-    echo -e "${CYAN}  仅构建新版本${NC}"
+    echo -e "${CYAN}  仅更新后端代码${NC}"
     echo -e "${CYAN}========================================${NC}"
     echo ""
     cd "$PROJECT_ROOT"
     
-    echo "构建后端..."
-    docker-compose -f docker-compose.prod.yml build backend || true
+    echo "拉取最新代码..."
+    git pull origin main || true
+    
+    echo ""
+    echo "重启后端服务..."
+    sudo systemctl restart smartalbum-backend
+    
+    echo ""
+    echo -e "${GREEN}后端更新完成!${NC}"
+    read -p "按回车键继续..."
+}
+
+do_update_frontend() {
+    echo -e "${CYAN}========================================${NC}"
+    echo -e "${CYAN}  仅更新前端代码${NC}"
+    echo -e "${CYAN}========================================${NC}"
+    echo ""
+    cd "$PROJECT_ROOT/frontend"
+    
+    echo "拉取最新代码..."
+    git pull origin main || true
     
     echo ""
     echo "构建前端..."
-    docker-compose -f docker-compose.prod.yml build frontend || true
+    npm ci
+    npm run build
     
     echo ""
-    echo -e "${GREEN}构建完成!${NC}"
+    echo "重启前端服务..."
+    sudo systemctl restart smartalbum-frontend
+    
+    echo ""
+    echo -e "${GREEN}前端更新完成!${NC}"
     read -p "按回车键继续..."
 }
 
@@ -269,12 +305,11 @@ do_show_logs() {
             ls -lt /var/log/smartalbum/health/*.log 2>/dev/null | head -5
             ;;
         6)
-            local container=$(docker ps --format "{{.Names}}" | grep "smartalbum" | head -1)
-            if [ -n "$container" ]; then
-                docker logs --tail 100 "$container"
-            else
-                echo "无运行中的容器"
-            fi
+            echo "后端服务日志:"
+            sudo journalctl -u smartalbum-backend --no-pager --lines 50
+            echo ""
+            echo "前端服务日志:"
+            sudo journalctl -u smartalbum-frontend --no-pager --lines 50
             ;;
     esac
     
@@ -303,20 +338,28 @@ main() {
         show_banner
         show_menu
         
-        read -p "请输入选项 [0-11]: " choice
+        read -p "请输入选项 [0-13]: " choice
         
         case $choice in
             1) do_full_deploy ;;
             2) do_quick_deploy ;;
-            3) do_build_only ;;
-            4) do_health_check ;;
-            5) do_migration_check ;;
-            6) do_monitor ;;
-            7) do_rollback ;;
-            8) do_list_backups ;;
-            9) do_show_status ;;
-            10) do_show_logs ;;
-            11) do_backup ;;
+            3) do_update_backend ;;
+            4) do_update_frontend ;;
+            5) do_health_check ;;
+            6) do_show_status ;;
+            7) do_monitor ;;
+            8) do_rollback ;;
+            9) do_list_backups ;;
+            10)
+                echo "重启所有服务..."
+                sudo systemctl restart smartalbum-backend smartalbum-frontend
+                echo -e "${GREEN}服务已重启${NC}"
+                ;;
+            11) do_show_logs ;;
+            12) do_backup ;;
+            13)
+                bash "$SCRIPT_DIR/cleanup-system.sh"
+                ;;
             0)
                 echo -e "${GREEN}再见!${NC}"
                 exit 0

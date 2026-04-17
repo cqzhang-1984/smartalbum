@@ -92,13 +92,13 @@
           </button>
         </form>
 
-        <!-- 默认账号提示 -->
+        <!-- 安全提示 -->
         <div class="mt-5 md:mt-6 p-3 md:p-4 bg-slate-800/50 rounded-xl">
           <p class="text-slate-400 text-xs text-center">
-            默认账号：<span class="text-slate-300">admin</span> / 密码：<span class="text-slate-300">admin123</span>
+            请使用管理员分配的账号密码登录
           </p>
           <p class="text-slate-500 text-xs text-center mt-1">
-            首次登录后请尽快修改密码
+            首次登录后请尽快修改默认密码
           </p>
         </div>
       </div>

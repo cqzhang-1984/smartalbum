@@ -299,10 +299,15 @@ EOF
     docker-compose -f "$compose_file" down --remove-orphans 2>/dev/null || true
     docker rm -f smartalbum-backend-$TARGET_ENV smartalbum-frontend-$TARGET_ENV smartalbum-redis-$TARGET_ENV 2>/dev/null || true
     
-    log "拉取最新代码..."
-    if [ -d ".git" ]; then
-        git fetch origin
-        git pull origin main || warn "Git pull 失败，使用本地代码"
+    # 可选：拉取最新代码（如果 SKIP_GIT_PULL=true 则跳过）
+    if [ "${SKIP_GIT_PULL:-false}" != "true" ]; then
+        log "拉取最新代码..."
+        if [ -d ".git" ]; then
+            git fetch origin
+            git pull origin main || warn "Git pull 失败，使用本地代码"
+        fi
+    else
+        log "跳过代码拉取（SKIP_GIT_PULL=true）"
     fi
     
     # 配置 Docker 镜像加速器
@@ -396,7 +401,7 @@ EOF
 }
 
 # =============================================================================
-# 主函数（简化版，保留核心逻辑）
+# 主函数
 # =============================================================================
 main() {
     init_logging
@@ -408,15 +413,139 @@ main() {
     log "内存限制模式: BUILD_MEMORY_LIMIT=$BUILD_MEMORY_LIMIT"
     log ""
     
+    # 检查root权限
+    if [ "$EUID" -ne 0 ]; then
+        warn "建议以 root 权限运行此脚本"
+    fi
+    
     cd "$PROJECT_ROOT"
     
-    # 执行部署流程（使用优化后的函数）
-    # 这里省略了其他阶段的代码，实际使用时需要包含完整的部署流程
+    # 执行部署流程
+    # 阶段 1: 预部署检查
+    section "阶段 1/8: 预部署检查"
+    cleanup_system
+    check_memory || exit 1
+    log "预部署检查通过 ✓"
+    
+    # 阶段 2: 执行备份
+    section "阶段 2/8: 执行全量备份"
+    if [ "${SKIP_BACKUP:-false}" != "true" ]; then
+        log "开始备份..."
+        if [ -f "$SCRIPT_DIR/full-backup.sh" ]; then
+            bash "$SCRIPT_DIR/full-backup.sh" || {
+                error "备份失败，终止部署"
+                exit 1
+            }
+            BACKUP_PATH=$(ls -t /opt/backups/smartalbum_*.tar.gz 2>/dev/null | head -1)
+            ROLLBACK_AVAILABLE=true
+            log "备份完成: $BACKUP_PATH"
+        else
+            warn "备份脚本不存在，跳过备份"
+        fi
+    else
+        warn "跳过备份步骤"
+    fi
+    
+    # 阶段 3: 确定目标环境
+    section "阶段 3/8: 确定目标环境"
+    log "检测当前运行环境..."
+    
+    # 检查蓝环境是否运行
+    if docker ps --format "{{.Names}}" | grep -q "smartalbum-backend-blue"; then
+        ACTIVE_ENV="BLUE"
+        TARGET_ENV="GREEN"
+    elif docker ps --format "{{.Names}}" | grep -q "smartalbum-backend-green"; then
+        ACTIVE_ENV="GREEN"
+        TARGET_ENV="BLUE"
+    else
+        log "未检测到运行中的环境，将部署到蓝环境 (BLUE)"
+        ACTIVE_ENV="NONE"
+        TARGET_ENV="BLUE"
+    fi
+    
+    log "当前活动环境: $ACTIVE_ENV"
+    log "目标部署环境: $TARGET_ENV"
+    
+    # 阶段 4: 构建新版本（低内存优化）
+    build_new_version_low_memory || exit 1
+    
+    # 阶段 5: 健康检查
+    section "阶段 5/8: 健康检查"
+    local TARGET_ENV_LOWER=$(echo "$TARGET_ENV" | tr '[:upper:]' '[:lower:]')
+    local backend_port=$( [ "$TARGET_ENV" = "BLUE" ] && echo "$BLUE_BACKEND_PORT" || echo "$GREEN_BACKEND_PORT" )
+    
+    log "等待服务健康检查..."
+    sleep 10
+    
+    local retry_count=0
+    while [ $retry_count -lt $MAX_RETRY_ATTEMPTS ]; do
+        if curl -sf "http://localhost:$backend_port/api/health" > /dev/null 2>&1; then
+            log "✓ 后端健康检查通过"
+            break
+        fi
+        retry_count=$((retry_count + 1))
+        log "等待服务就绪... ($retry_count/$MAX_RETRY_ATTEMPTS)"
+        sleep 5
+    done
+    
+    if [ $retry_count -eq $MAX_RETRY_ATTEMPTS ]; then
+        error "健康检查失败"
+        exit 1
+    fi
+    
+    # 阶段 6: 数据迁移检查
+    section "阶段 6/8: 数据迁移检查"
+    if [ -f "data/smartalbum.db" ]; then
+        log "检查数据库完整性..."
+        if sqlite3 data/smartalbum.db "PRAGMA integrity_check;" | grep -q "ok"; then
+            log "✓ 数据库完整性正常"
+        else
+            error "数据库完整性检查失败"
+            exit 1
+        fi
+    fi
+    
+    # 阶段 7: 切换流量
+    section "阶段 7/8: 切换流量"
+    log "准备切换流量到 $TARGET_ENV 环境..."
+    
+    # 简单的流量切换：停止旧环境，新环境直接使用标准端口
+    if [ "$ACTIVE_ENV" != "NONE" ]; then
+        local ACTIVE_ENV_LOWER=$(echo "$ACTIVE_ENV" | tr '[:upper:]' '[:lower:]')
+        log "停止旧环境 ($ACTIVE_ENV)..."
+        docker-compose -f "docker-compose.$ACTIVE_ENV_LOWER.yml" down 2>/dev/null || true
+    fi
+    
+    # 修改新环境使用标准端口
+    log "将 $TARGET_ENV 环境绑定到标准端口..."
+    local compose_file="docker-compose.$TARGET_ENV_LOWER.yml"
+    sed -i "s/- \"${FRONTEND_PORT}:80\"/- \"80:80\"/" "$compose_file" 2>/dev/null || true
+    docker-compose -f "$compose_file" up -d
+    
+    log "流量已切换到 $TARGET_ENV 环境 ✓"
+    
+    # 阶段 8: 监控验证
+    section "阶段 8/8: 监控验证"
+    log "开始部署后监控 (30秒)..."
+    sleep 30
+    
+    if curl -sf "http://localhost/api/health" > /dev/null 2>&1; then
+        log "✓ 服务运行正常"
+    else
+        error "监控验证失败"
+        exit 1
+    fi
     
     section "部署完成"
     log "=============================================="
     log "  低内存部署模式执行完成!"
     log "=============================================="
+    log "目标环境: $TARGET_ENV"
+    log "备份文件: ${BACKUP_PATH:-无}"
+    log "日志文件: $LOG_FILE"
+    log ""
+    log "当前运行容器:"
+    docker ps --filter "name=smartalbum" --format "table {{.Names}}\t{{.Status}}"
 }
 
 # 运行主函数

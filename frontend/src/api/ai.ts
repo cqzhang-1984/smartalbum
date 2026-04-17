@@ -112,16 +112,16 @@ export const aiApi = {
   /**
    * 文生图生成
    */
-  async generateImage(request: GenerateImageRequest): Promise<GenerateImageResponse> {
-    const response = await request.post('/ai/image-gen/generate', request)
+  async generateImage(data: GenerateImageRequest): Promise<GenerateImageResponse> {
+    const response = await request.post('/ai/image-gen/generate', data)
     return response.data
   },
 
   /**
    * 基于照片生成（图生图）
    */
-  async generateFromPhoto(photoId: string, request: GenerateFromPhotoRequest): Promise<GenerateImageResponse> {
-    const response = await request.post(`/ai/image-gen/generate-from-photo/${photoId}`, request)
+  async generateFromPhoto(photoId: string, data: GenerateFromPhotoRequest): Promise<GenerateImageResponse> {
+    const response = await request.post(`/ai/image-gen/generate-from-photo/${photoId}`, data)
     return response.data
   },
 

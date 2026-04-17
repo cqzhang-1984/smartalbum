@@ -2,18 +2,26 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.config import settings
 
+# 检测是否为 SQLite（SQLite 不支持连接池参数）
+is_sqlite = settings.DATABASE_URL.startswith('sqlite')
+
 # 创建异步数据库引擎 - 配置连接池
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    future=True,
-    # 连接池配置
-    pool_size=10,                    # 连接池大小
-    max_overflow=20,                 # 最大溢出连接数
-    pool_timeout=30,                 # 获取连接超时时间（秒）
-    pool_recycle=3600,               # 连接回收时间（秒）
-    pool_pre_ping=True,              # 连接前ping检测，避免使用失效连接
-)
+engine_kwargs = {
+    'echo': settings.DEBUG,
+    'future': True,
+}
+
+# 只有非 SQLite 数据库才使用连接池配置
+if not is_sqlite:
+    engine_kwargs.update({
+        'pool_size': 10,                    # 连接池大小
+        'max_overflow': 20,                 # 最大溢出连接数
+        'pool_timeout': 30,                 # 获取连接超时时间（秒）
+        'pool_recycle': 3600,               # 连接回收时间（秒）
+        'pool_pre_ping': True,              # 连接前ping检测，避免使用失效连接
+    })
+
+engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
 
 # 创建异步会话工厂
 AsyncSessionLocal = sessionmaker(

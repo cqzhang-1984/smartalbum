@@ -121,6 +121,14 @@ temp/
 .env.*.local
 !.env.example
 
+# 前端环境文件
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+!frontend/.env.example
+!frontend/.env.development
+!frontend/.env.production
+
 # 密钥和证书
 *.pem
 *.key

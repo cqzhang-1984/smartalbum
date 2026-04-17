@@ -10,6 +10,12 @@ set -euo pipefail
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# 加载公共库（如果存在）
+if [ -f "$SCRIPT_DIR/../lib/common.sh" ]; then
+    source "$SCRIPT_DIR/../lib/common.sh"
+fi
+
 LOG_DIR="/var/log/smartalbum/health"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$LOG_DIR/health-check-$TIMESTAMP.log"
@@ -28,6 +34,23 @@ THRESHOLD_ERROR_RATE="${THRESHOLD_ERROR_RATE:-1}"          # %
 THRESHOLD_CPU="${THRESHOLD_CPU:-80}"                       # %
 THRESHOLD_MEMORY="${THRESHOLD_MEMORY:-85}"                 # %
 THRESHOLD_DISK="${THRESHOLD_DISK:-85}"                     # %
+
+# =============================================================================
+# 工具函数（保持独立，确保无依赖也能运行）
+# =============================================================================
+
+# 浮点数比较（使用awk替代bc，避免额外依赖）
+float_compare() {
+    local num1="$1"
+    local op="$2"
+    local num2="$3"
+    awk "BEGIN {exit !($num1 $op $num2)}"
+}
+
+# 检查命令是否存在
+check_command() {
+    command -v "$1" &>/dev/null
+}
 
 # 颜色
 RED='\033[0;31m'
@@ -78,73 +101,67 @@ info() {
 # 检查项
 # =============================================================================
 
-# 1. Docker 服务检查
-check_docker_services() {
-    info "检查 Docker 服务状态..."
+# 1. 系统服务检查 (裸机部署)
+check_systemd_services() {
+    info "检查系统服务状态..."
     
-    local containers=("smartalbum-backend" "smartalbum-frontend")
+    local services=("smartalbum-backend" "smartalbum-frontend" "nginx")
     local all_healthy=true
     
-    for container in "${containers[@]}"; do
-        # 检查容器是否存在且运行
-        if docker ps --format "{{.Names}}" | grep -q "^${container}$"; then
-            local health_status=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "unknown")
-            local status=$(docker inspect --format='{{.State.Status}}' "$container" 2>/dev/null || echo "unknown")
+    for service in "${services[@]}"; do
+        # 检查服务是否已安装
+        if ! systemctl list-unit-files | grep -q "^${service}"; then
+            warn "服务 $service 未安装，跳过检查"
+            continue
+        fi
+        
+        # 检查服务状态
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            local status=$(systemctl show --property=ActiveState --value "$service")
+            local uptime=$(systemctl show --property=ActiveEnterTimestamp --value "$service" | cut -d' ' -f2-)
             
-            if [ "$status" = "running" ]; then
-                if [ "$health_status" = "healthy" ] || [ "$health_status" = "unknown" ]; then
-                    success "容器 $container 运行正常 (状态: $status, 健康: $health_status)"
-                else
-                    warn "容器 $container 运行中但健康状态异常: $health_status"
-                    all_healthy=false
+            success "服务 $service 运行正常 (状态: $status, 启动: $uptime)"
+            
+            # 获取进程资源使用
+            local pid=$(systemctl show --property=MainPID --value "$service")
+            if [ "$pid" != "0" ] && [ -n "$pid" ]; then
+                local cpu_mem=$(ps -p "$pid" -o %cpu=,%mem= 2>/dev/null || echo "N/A")
+                local cpu=$(echo "$cpu_mem" | awk '{print $1}')
+                local mem=$(echo "$cpu_mem" | awk '{print $2}')
+                
+                if [ "$cpu" != "N/A" ] && float_compare "$cpu" ">" "$THRESHOLD_CPU"; then
+                    warn "服务 $service CPU 使用率过高: ${cpu}%"
+                    high_resource=true
                 fi
-            else
-                fail "容器 $container 状态异常: $status"
-                all_healthy=false
+                
+                if [ "$mem" != "N/A" ] && float_compare "$mem" ">" "$THRESHOLD_MEMORY"; then
+                    warn "服务 $service 内存使用率过高: ${mem}%"
+                    high_resource=true
+                fi
             fi
         else
-            # 尝试检查蓝绿部署环境
-            if docker ps --format "{{.Names}}" | grep -q "smartalbum"; then
-                info "检测到蓝绿部署环境"
-                local running_containers=$(docker ps --format "{{.Names}}" | grep "smartalbum" | tr '\n' ', ')
-                success "运行中的容器: $running_containers"
-            else
-                fail "未找到 $container 容器"
-            fi
+            local status=$(systemctl show --property=ActiveState --value "$service" 2>/dev/null || echo "unknown")
+            fail "服务 $service 未运行 (状态: $status)"
             all_healthy=false
         fi
     done
     
-    # 检查容器资源使用
-    info "检查容器资源使用..."
-    local high_resource=false
-    
-    while IFS= read -r line; do
-        if [ -n "$line" ]; then
-            local name=$(echo "$line" | awk '{print $1}')
-            local cpu=$(echo "$line" | awk '{print $2}')
-            local mem=$(echo "$line" | awk '{print $3}')
-            
-            # 移除百分号
-            cpu_num=${cpu%\%}
-            mem_num=${mem%\%}
-            
-            if (( $(echo "$cpu_num > $THRESHOLD_CPU" | bc -l 2>/dev/null || echo "0") )); then
-                warn "容器 $name CPU 使用率过高: $cpu"
-                high_resource=true
-            fi
-            
-            if (( $(echo "$mem_num > $THRESHOLD_MEMORY" | bc -l 2>/dev/null || echo "0") )); then
-                warn "容器 $name 内存使用率过高: $mem"
-                high_resource=true
-            fi
-            
-            METRICS+=("{\"container\":\"$name\",\"cpu\":\"$cpu\",\"memory\":\"$mem\"}")
+    # 检查服务是否开机自启
+    info "检查服务开机自启配置..."
+    for service in "${services[@]}"; do
+        if systemctl is-enabled --quiet "$service" 2>/dev/null; then
+            success "服务 $service 已配置开机自启"
+        else
+            warn "服务 $service 未配置开机自启"
         fi
-    done < <(docker stats --no-stream --format "{{.Name}}\t{{.CPUPerc}}\t{{.MemPerc}}" 2>/dev/null | grep "smartalbum" || true)
+    done
+            
+            METRICS+=("{\"service\":\"$name\",\"cpu\":\"$cpu\",\"memory\":\"$mem\"}")
+        fi
+    done
     
     if [ "$high_resource" = false ]; then
-        success "容器资源使用正常"
+        success "服务资源使用正常"
     fi
     
     $all_healthy
@@ -176,7 +193,7 @@ check_api_health() {
                 BACKEND_URL="$url"
                 success "API 健康检查通过 (URL: $url, 响应时间: ${response_time}s)"
                 
-                if (( $(echo "$response_time > $THRESHOLD_RESPONSE_TIME" | bc -l 2>/dev/null || echo "0") )); then
+                if float_compare "$response_time" ">" "$THRESHOLD_RESPONSE_TIME"; then
                     warn "API 响应时间较慢: ${response_time}s (阈值: ${THRESHOLD_RESPONSE_TIME}s)"
                 fi
                 
@@ -336,7 +353,7 @@ check_system_resources() {
     local mem_used=$(echo "$mem_info" | awk '{print $3}')
     local mem_usage=$(awk "BEGIN {printf \"%.1f\", ($mem_used/$mem_total)*100}")
     
-    if (( $(echo "$mem_usage > $THRESHOLD_MEMORY" | bc -l 2>/dev/null || echo "0") )); then
+    if float_compare "$mem_usage" ">" "$THRESHOLD_MEMORY"; then
         warn "内存使用率过高: ${mem_usage}%"
     else
         success "内存使用率正常: ${mem_usage}%"
@@ -384,16 +401,26 @@ check_logs() {
     
     local error_count=0
     
-    # 检查Docker容器日志中的错误
-    local containers=$(docker ps --format "{{.Names}}" | grep "smartalbum" 2>/dev/null || true)
+    # 检查系统服务日志中的错误 (使用journalctl)
+    local services=("smartalbum-backend" "smartalbum-frontend")
     
-    for container in $containers; do
-        local recent_errors=$(docker logs --since=1h "$container" 2>&1 | grep -i "error\|exception\|fatal" | wc -l)
-        if [ "$recent_errors" -gt 10 ]; then
-            warn "容器 $container 最近1小时有 $recent_errors 个错误日志"
-            error_count=$((error_count + recent_errors))
+    for service in "${services[@]}"; do
+        if systemctl list-unit-files | grep -q "^${service}"; then
+            local recent_errors=$(journalctl -u "$service" --since "1 hour ago" --no-pager 2>/dev/null | grep -i "error\|exception\|fatal" | wc -l)
+            if [ "$recent_errors" -gt 10 ]; then
+                warn "服务 $service 最近1小时有 $recent_errors 个错误日志"
+                error_count=$((error_count + recent_errors))
+            fi
         fi
     done
+    
+    # 检查Nginx错误日志
+    if [ -f "/var/log/nginx/error.log" ]; then
+        local nginx_errors=$(tail -n 1000 /var/log/nginx/error.log 2>/dev/null | grep "$(date '+%Y/%m/%d')" | wc -l)
+        if [ "$nginx_errors" -gt 50 ]; then
+            warn "Nginx 今天有较多错误日志: $nginx_errors 条"
+        fi
+    fi
     
     if [ $error_count -eq 0 ]; then
         success "近期错误日志正常"
@@ -464,10 +491,24 @@ send_alert() {
         
         local message="SmartAlbum 健康检查失败"
         local details="${FAILED_CHECKS[*]}"
+        local alert_result=0
         
-        curl -X POST -H "Content-Type: application/json" \
+        # 发送告警，添加超时和错误处理
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 10 \
+            -X POST -H "Content-Type: application/json" \
             -d "{\"text\":\"$message\",\"details\":\"$details\",\"timestamp\":\"$TIMESTAMP\"}" \
-            "$ALERT_WEBHOOK" 2>/dev/null || warn "告警发送失败"
+            "$ALERT_WEBHOOK" 2>/dev/null)
+        
+        if [ "$http_code" = "200" ] || [ "$http_code" = "201" ] || [ "$http_code" = "204" ]; then
+            success "告警通知发送成功"
+        else
+            warn "告警通知发送失败 (HTTP $http_code)"
+            alert_result=1
+        fi
+        
+        return $alert_result
     fi
 }
 
@@ -482,15 +523,26 @@ main() {
     log "开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
     log "========================================"
     
-    # 执行所有检查
-    check_docker_services || true
-    check_api_health || true
-    check_frontend || true
-    check_database || true
-    check_storage || true
-    check_system_resources || true
-    check_network || true
-    check_logs || true
+    # 检查必要命令
+    local required_commands=("curl" "systemctl" "awk" "journalctl")
+    for cmd in "${required_commands[@]}"; do
+        if ! check_command "$cmd"; then
+            error "缺少必要命令: $cmd"
+            exit 1
+        fi
+    done
+    
+    # 执行所有检查（收集模式，不立即退出）
+    local check_failed=0
+    
+    check_systemd_services || check_failed=1
+    check_api_health || check_failed=1
+    check_frontend || check_failed=1
+    check_database || check_failed=1
+    check_storage || check_failed=1
+    check_system_resources || check_failed=1
+    check_network || check_failed=1
+    check_logs || check_failed=1
     
     # 生成报告
     generate_report
